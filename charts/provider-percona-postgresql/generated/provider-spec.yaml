@@ -2,6 +2,11 @@
 # Do not edit manually. Run `make generate` to update.
 spec:
   componentTypes:
+    fluentbit:
+      defaultVersion: 5.1.1-1
+      versions:
+        - image: percona/fluentbit:5.1.1-1
+          version: 5.1.1-1
     pgbackrest:
       defaultVersion: 2.59.0-1
       versions:
@@ -86,6 +91,21 @@ spec:
 
                 applied on top of, and overrides, the operator's built-in defaults.
               type: string
+            logCollector:
+              description: |-
+                LogCollector configures the operator's log collector: a Fluent Bit
+                "logs" sidecar on each instance pod that streams PostgreSQL and
+                pgBackRest logs to its stdout as JSON, plus a "logrotate" sidecar that
+                caps the log files on the data volume.
+              properties:
+                enabled:
+                  description: |-
+                    Enabled turns the log collector on or off. Unset turns it on for new
+                    instances and leaves existing ones as they are (off for instances
+                    created before the log collector was available). Changing it restarts
+                    the instance pods.
+                  type: boolean
+              type: object
             pgHBA:
               description: |-
                 PgHBA declares which clients may connect to which databases as which
@@ -230,6 +250,16 @@ spec:
               uiType: select
               validation:
                 required: true
+            logCollector:
+              fieldParams:
+                defaultValue: true
+                helperText: Streams PostgreSQL and pgBackRest logs to the instance pods' "logs" container (kubectl logs <pod> -c logs) and rotates the log files on the data volume. Adds two sidecars to each instance pod; changing it restarts them.
+                label: Collect logs
+                modes:
+                  edit:
+                    defaultValue: false
+              path: spec.components.engine.parameters.logCollector.enabled
+              uiType: toggle
             pgHBA:
               fieldParams:
                 helperText: 'Optional. One pg_hba.conf record per line, checked in order before the default rule that admits every user over TLS with a password; end with a reject record to allow only what is listed. Methods: scram-sha-256, md5, cert, ldap, radius, reject.'
@@ -260,6 +290,7 @@ spec:
           componentsOrder:
             - configuration
             - pgHBA
+            - logCollector
             - podSchedulingPolicy
             - engineExposure
           description: Fine-tune PostgreSQL by overriding its default configuration parameters.
@@ -596,6 +627,10 @@ spec:
         proxy: 1.25.2-6
       name: 14.24-1
     - components:
+        engine: 14.24-1
+        proxy: 1.25.2-6
+      name: 14.24-1
+    - components:
         engine: 15.15-2
         proxy: 1.25.2-6
       name: 15.15-2
@@ -607,6 +642,10 @@ spec:
         engine: 15.18-1
         proxy: 1.25.2-6
       name: 15.18-1
+    - components:
+        engine: 15.19-1
+        proxy: 1.25.2-6
+      name: 15.19-1
     - components:
         engine: 15.19-1
         proxy: 1.25.2-6
@@ -628,6 +667,10 @@ spec:
         proxy: 1.25.2-6
       name: 16.15-1
     - components:
+        engine: 16.15-1
+        proxy: 1.25.2-6
+      name: 16.15-1
+    - components:
         engine: 17.7-2
         proxy: 1.25.2-6
       name: 17.7-2
@@ -639,6 +682,10 @@ spec:
         engine: 17.10-1
         proxy: 1.25.2-6
       name: 17.10-1
+    - components:
+        engine: 17.11.1-1
+        proxy: 1.25.2-6
+      name: 17.11.1-1
     - components:
         engine: 17.11.1-1
         proxy: 1.25.2-6
