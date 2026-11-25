@@ -69,7 +69,7 @@ provider itself is covered under [Installation](#installation).
 | Version upgrades | ✅ | of the deployed PostgreSQL version — change `spec.version`; see [Versions](#versions) |
 | Custom configuration | ✅ | `spec.components.engine.parameters.configuration` — see [Custom PostgreSQL configuration](#custom-postgresql-configuration) |
 | Exposure | ✅ | `spec.components.<name>.service.serviceType`: `ClusterIP` (default), `LoadBalancer` or `NodePort`, for `engine` and `proxy` independently — both are exposed in the UI. `proxy.service` controls how clients reach pgBouncer (needs `proxy.replicas` ≥ 1) and is how most clients should connect; `engine.service` exposes the PostgreSQL primary and replica Services directly, bypassing pgBouncer, for clients that need a direct connection. `service.annotations` and, for `LoadBalancer`, `service.loadBalancerService.sourceRanges` are also supported on both, but only via the `Instance` spec directly — the UI doesn't expose them yet ([openeverest#1959](https://github.com/openeverest/openeverest/issues/1959), [openeverest#2398](https://github.com/openeverest/openeverest/issues/2398)) |
-| Monitoring | ✅ | PMM 3, via a `spec.monitoring.destinations` entry naming a `MonitoringDestination` of a `pmm` class |
+| Monitoring | ✅ | via `spec.monitoring.destinations`: PMM 3 (`pmm` class), and Prometheus / VictoriaMetrics (or any metrics class) through `postgres_exporter` and `pgbouncer_exporter` sidecars — see [Monitoring](#monitoring) |
 | TLS | ✅ | on by default; generated, or your own certificates — see [TLS](#tls) |
 | Client access rules (pg_hba) | ✅ | `spec.components.engine.parameters.pgHBA` — which clients may connect to which databases as which users; see [Client access rules](#client-access-rules-pg_hba) |
 | Logs | ✅ | on by default for new instances: PostgreSQL and pgBackRest logs streamed by a log collector sidecar — see [Logs](#logs) |
@@ -249,11 +249,58 @@ storage) include `engine.parameters.configuration`, covered in
 [Custom PostgreSQL configuration](#custom-postgresql-configuration), and
 `engine.parameters.logCollector`, covered in [Logs](#logs).
 
-When the instance sends to a PMM destination, its PostgreSQL metrics in PMM carry `namespace`
-and `core_openeverest_io_instance` labels, so they can be queried per instance. The
-destination's and the entry's parameters are decoded with the pmm contract module
-(`github.com/openeverest/monitoring-pmm/api`): a parameter it does not know, or a `url` with a
-path, fails rendering (the binding reports Configured `RenderFailed`) instead of being ignored.
+### Monitoring
+
+Monitoring is configured through `MonitoringDestination`s: each entry of
+`spec.monitoring.destinations` sends the instance's monitoring data to one destination.
+
+```yaml
+spec:
+  monitoring:
+    destinations:
+      - name: pmm
+        destinationRef:
+          name: pmm-prod
+        # Optional: resources of the PMM client container.
+        parameters:
+          resources:
+            limits:
+              memory: 256Mi
+      - name: prometheus
+        destinationRef:
+          name: prometheus
+```
+
+The provider declares its monitoring contract in
+[definition/monitoring.yaml](definition/monitoring.yaml): the `pmm` integration, and an
+exporter metrics endpoint on every `postgresql` and `pgbouncer` component.
+
+- **PMM** (the `pmm` class, installed by the `monitoring-pmm` extension) is rendered by the
+  provider into the operator's `spec.pmm`: the server from the destination's `url` parameter,
+  the token from the `token` key of its `ServiceAccountToken` credentials Secret, the PMM
+  client image from the class. pmm-client does not verify the PMM server certificate, so the
+  binding reports `AgentTLSNotVerified`. The destination's and the entry's parameters are
+  decoded with the pmm contract module (`github.com/openeverest/monitoring-pmm/api`): a
+  parameter it does not know, or a `url` with a path, fails rendering (the binding reports
+  Configured `RenderFailed`) instead of being ignored. The instance's PostgreSQL metrics in
+  PMM carry `namespace` and `core_openeverest_io_instance` labels, so they can be queried per
+  instance.
+- **Metrics backends** (for example the `prometheus` and `victoriametrics` classes) run a
+  `postgres_exporter` sidecar next to every PostgreSQL pod and a `pgbouncer_exporter` sidecar
+  next to every PgBouncer pod while one of the instance's destinations requires metrics. The
+  sidecars serve on the `metrics` port (9187 and 9127) and log in as the `everest-monitor`
+  superuser, whose credentials the operator generates in the
+  `<instance>-pguser-everest-monitor` Secret. PgBouncer lists it in `stats_users` and
+  authenticates admin-console logins against the `postgres` database (`auth_dbname`). The
+  images are pinned by the `postgresExporter` and `pgbouncerExporter` component types in
+  [definition/versions.yaml](definition/versions.yaml). The provider publishes each
+  component's endpoint in `status.monitoring.sources` once it has a ready pod, and the class's
+  extension creates the scrape resources. Adding or removing the sidecars restarts the pods one
+  at a time. The `everest-monitor` role stays in PostgreSQL after metrics are turned off; the
+  operator does not drop roles removed from its spec.
+
+`kubectl get monitoringbindings` lists one binding per destination entry, and the
+instance's `MonitoringConfigured` condition reports whether every entry is configured.
 
 ### TLS
 
