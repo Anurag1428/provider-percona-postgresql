@@ -2,13 +2,13 @@ package provider
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"time"
 
 	backupv1alpha1 "github.com/openeverest/openeverest/v2/api/backup/v1alpha1"
 	apicommon "github.com/openeverest/openeverest/v2/api/common/v1alpha1"
 	"github.com/openeverest/openeverest/v2/provider-runtime/controller"
+	"github.com/openeverest/provider-percona-postgresql/definition/backupclasses/pg"
 	pgv2 "github.com/percona/percona-postgresql-operator/v3/pkg/apis/pgv2.percona.com/v2"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -82,6 +82,15 @@ func (p *Provider) SyncBackup(c *controller.Context, backup *backupv1alpha1.Back
 			return controller.BackupExecutionStatus{
 				State:             backupv1alpha1.BackupStatePending,
 				Message:           "Waiting for operator scheduled backup",
+				OperatorBackupRef: opRef,
+			}, nil
+		}
+
+		backupParams, paramsErr := parseBackupParameters(backup.Spec.Parameters)
+		if paramsErr != nil {
+			return controller.BackupExecutionStatus{
+				State:             backupv1alpha1.BackupStateFailed,
+				Message:           fmt.Sprintf("spec.parameters: %v", paramsErr),
 				OperatorBackupRef: opRef,
 			}, nil
 		}
@@ -162,7 +171,7 @@ func (p *Provider) SyncBackup(c *controller.Context, backup *backupv1alpha1.Back
 			}, nil
 		}
 
-		backupType := resolveBackupType(backup)
+		backupType := backupTypeOf(backupParams)
 
 		opBackup = &pgv2.PerconaPGBackup{
 			ObjectMeta: metav1.ObjectMeta{
@@ -269,6 +278,14 @@ func (p *Provider) SyncRestore(c *controller.Context, restore *backupv1alpha1.Re
 		Group: pgv2.GroupVersion.Group,
 		Kind:  "PerconaPGRestore",
 		Name:  restore.Name,
+	}
+
+	if err := validateRestoreParameters(restore.Spec.Parameters); err != nil {
+		return controller.RestoreExecutionStatus{
+			State:              backupv1alpha1.RestoreStateFailed,
+			Message:            fmt.Sprintf("spec.parameters: %v", err),
+			OperatorRestoreRef: opRef,
+		}, nil
 	}
 
 	repoName, restoreOptions, pending, err := resolveRestoreSource(c, restore, opRef)
@@ -816,7 +833,7 @@ func immutableBackupSpecChangeMessage(opBackup *pgv2.PerconaPGBackup, backup *ba
 	return ""
 }
 
-const defaultBackupType = "full"
+const defaultBackupType = pg.PgBackupTypeFull
 
 // enqueueRestoreInstance maps a Restore event to a reconcile request for the
 // Instance it targets, so the Instance status tracks the restore's lifecycle.
@@ -833,22 +850,4 @@ func enqueueRestoreInstance() func(ctx context.Context, obj client.Object) []rec
 			},
 		}}
 	}
-}
-
-// resolveBackupType extracts the pgBackRest backup type from the Backup CR's
-// parameters and returns the pgBackRest CLI --type flag value (full/diff/incr).
-func resolveBackupType(backup *backupv1alpha1.Backup) string {
-	if backup.Spec.Parameters == nil || len(backup.Spec.Parameters.Raw) == 0 {
-		return defaultBackupType
-	}
-	var cfg struct {
-		Type string `json:"type"`
-	}
-	if err := json.Unmarshal(backup.Spec.Parameters.Raw, &cfg); err != nil {
-		return defaultBackupType
-	}
-	if cfg.Type == "" {
-		return defaultBackupType
-	}
-	return cfg.Type
 }

@@ -16,12 +16,14 @@ package provider
 
 import (
 	"errors"
+	"fmt"
 
 	"k8s.io/apimachinery/pkg/util/validation/field"
 
 	corev1alpha1 "github.com/openeverest/openeverest/v2/api/core/v1alpha1"
 	"github.com/openeverest/openeverest/v2/provider-runtime/controller"
 
+	"github.com/openeverest/provider-percona-postgresql/definition/backupclasses/pg"
 	"github.com/openeverest/provider-percona-postgresql/internal/common"
 )
 
@@ -112,7 +114,73 @@ func (p *Provider) Validate(in controller.ValidationInput) controller.Validation
 		errs = append(errs, validateTLSParameters(tls, field.NewPath("spec", "parameters", "tls"))...)
 	}
 
+	errs = append(errs, validateBackupSchedules(instance)...)
+
 	return controller.ValidationResult{Errors: errs}
+}
+
+// validateBackupSchedules checks the schedules of each backup storage:
+//   - each schedule's Name must be unique across the whole Instance (it
+//     becomes Backup.spec.scheduleName on mirrored Backup CRs); it is a
+//     free-form user-facing identifier, not a backup type.
+//   - each schedule's Parameters must decode against the "pg" BackupClass's
+//     PgBackupConfig (no undeclared fields, a known type if set); its
+//     effective backup type (Parameters.type, default full) is what
+//     buildPGBackRestSchedules maps to the matching pgBackRest scheduler
+//     slot.
+//   - at most one enabled schedule per effective type per storage, since
+//     pgBackRest's scheduler config has only one slot per type (Full/
+//     Differential/Incremental); a second one would silently overwrite the
+//     first.
+//   - a schedule whose effective type is "diff" cannot use time-based
+//     retention; pgBackRest only supports count retention for differential
+//     backups (checked again at Sync time in applyRetentionConfig, but
+//     surfacing it here fails fast).
+func validateBackupSchedules(instance *corev1alpha1.Instance) field.ErrorList {
+	backup := instance.Spec.Backup
+	if backup == nil {
+		return nil
+	}
+	var errs field.ErrorList
+	storagesPath := field.NewPath("spec", "backup", "storages")
+	seenNames := map[string]bool{}
+	for i, storage := range backup.Storages {
+		schedulesPath := storagesPath.Index(i).Child("schedules")
+		seenTypes := map[pg.PgBackupType]bool{}
+		for j, schedule := range storage.Schedules {
+			path := schedulesPath.Index(j)
+
+			if seenNames[schedule.Name] {
+				errs = append(errs, field.Duplicate(path.Child("name"), schedule.Name))
+			}
+			seenNames[schedule.Name] = true
+
+			cfg, err := parseBackupParameters(schedule.Parameters)
+			if err != nil {
+				errs = append(errs, field.Invalid(path.Child("parameters"), field.OmitValueType{}, err.Error()))
+				continue
+			}
+			backupType := backupTypeOf(cfg)
+
+			if schedule.Enabled {
+				if seenTypes[backupType] {
+					errs = append(errs, field.Invalid(path.Child("parameters", "type"), backupType,
+						fmt.Sprintf("another enabled schedule on this storage already runs %q backups; "+
+							"the PG operator supports only one schedule per backup type per storage", backupType),
+					))
+				}
+				seenTypes[backupType] = true
+			}
+
+			if backupType == pg.PgBackupTypeDiff && schedule.Retention != nil &&
+				schedule.Retention.Type != corev1alpha1.BackupScheduleRetentionTypeCount {
+				errs = append(errs, field.NotSupported(path.Child("retention", "type"), schedule.Retention.Type,
+					[]corev1alpha1.BackupScheduleRetentionType{corev1alpha1.BackupScheduleRetentionTypeCount},
+				))
+			}
+		}
+	}
+	return errs
 }
 
 // validateImage checks that the component's image can be resolved: from its
